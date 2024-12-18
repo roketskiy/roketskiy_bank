@@ -1,3 +1,3 @@
 # roketskiy_bank
-record my  project at BUPT在北京邮电大学记录我的项目
+大二数电——电子骰子游戏
 包含提高功能
