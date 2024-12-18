@@ -1,0 +1,734 @@
+
+// 模块 demo
+// 用于模拟一个简单的双人对战游戏，包括按钮输入、计分显示、LED指示、蜂鸣器、以及骰子显示。
+// 模块基于有限状态机 (FSM) 实现游戏逻辑控制。
+
+module demo(
+    input clk,               // 系统时钟信号 (1MHz)
+    input rst,               // 全局复位信号，高电平有效
+    input BTN0,              // 玩家 0 按钮输入
+    input BTN7,              // 玩家 7 按钮输入
+    input [2:0] win_score,   // 胜利分数阈值
+    output wire [6:0] seg,   // 数码管显示数据
+    output wire [7:0] an,    // 数码管位选信号
+    output wire buzze,       // 蜂鸣器输出
+    output wire [15:0] led_s,// LED 指示灯
+    output wire [0:7] G_rgb, // G 通道 RGB 阵列
+    output wire [0:7] R_rgb, // R 通道 RGB 阵列
+    output wire [0:7] row_rgb// 行信号控制
+);
+
+    // 内部信号定义
+    reg [2:0] current_state; // 当前 FSM 状态
+    reg [1:0] winner;        // 胜者标志 (00: 无, 01: 玩家 0, 10: 玩家 7)
+    wire BTN0_v;             // 消抖后的 BTN0 输入
+    wire BTN7_v;             // 消抖后的 BTN7 输入
+    reg [2:0] score0;        // 玩家 0 分数
+    reg [2:0] score7;        // 玩家 7 分数
+    reg [24:0] cnt_C;        // 庆祝状态计数器
+    reg enable;              // 启动随机数生成器
+    wire [3:0] random_num1;  // 随机数 1
+    wire [3:0] random_num2;  // 随机数 2
+    reg [24:0] cnt;          // 骰子滚动计数器
+
+    // FSM 状态参数定义
+    parameter rst_state = 3'b000;         // 复位状态
+    parameter wait_state = 3'b001;        // 等待状态
+    parameter roll_state = 3'b010;        // 骰子滚动状态
+    parameter celebrate_state = 3'b011;  // 庆祝状态
+
+    // 子模块实例化
+    // 随机数生成器 1
+    lcg_random_mcu nn1(
+        .clk(clk),
+        .rst(~rst),
+        .enable(enable),
+        .SEED(6'd35),         // 初始种子
+        .random_num(random_num1)
+    );
+
+    // 随机数生成器 2
+    lcg_random_mcu nn2(
+        .clk(clk),
+        .rst(~rst),
+        .enable(enable),
+        .SEED(6'd24),         // 初始种子
+        .random_num(random_num2)
+    );
+
+    // 按钮 0 消抖
+    debounce dd1(
+        .clk(clk),
+        .rst(~rst),
+        .key_in(BTN0),
+        .key_out(BTN0_v)
+    );
+
+    // 按钮 7 消抖
+    debounce dd2(
+        .clk(clk),
+        .rst(~rst),
+        .key_in(BTN7),
+        .key_out(BTN7_v)
+    );
+
+    // 蜂鸣器模块
+    buzzer bb1(
+        .clk(clk),
+        .rst(~rst),
+        .winner(winner),
+        .current_state(current_state),
+        .buzze(buzze)
+    );
+
+    // 数码管显示模块
+    port_seg ss1(
+        .clk(clk),
+        .rst_n(~rst),
+        .num1(score0),       // 玩家 0 分数
+        .num2(score7),       // 玩家 7 分数
+        .seg(seg),
+        .an(an)
+    );
+
+    // LED 指示模块
+    port_led ll1(
+        .clk(clk),
+        .rst(~rst),
+        .winner(winner),
+        .current_state(current_state),
+        .led_s(led_s)
+    );
+
+    // 骰子显示模块
+    dice dd3(
+        .clk(clk),
+        .rst(~rst),
+        .current_state(current_state),
+        .rand1(random_num1),
+        .rand2(random_num2),
+        .R_rgb(R_rgb),
+        .G_rgb(G_rgb),
+        .row_rgb(row_rgb)
+    );
+
+    // 状态机实现
+    always @(posedge clk) begin
+        if (~rst) begin
+            current_state <= rst_state;  // 复位到初始状态
+        end else begin
+            case (current_state)
+                rst_state: begin
+                    if (rst)
+                        current_state <= wait_state;  // 进入等待状态
+                end
+                wait_state: begin
+                    if (BTN0_v && BTN7_v) begin
+                        current_state <= roll_state;  // 两个按钮同时按下，进入滚动状态
+                    end else if (score0 >= win_score || score7 >= win_score) begin
+                        current_state <= celebrate_state;  // 达到胜利分数，进入庆祝状态
+                    end else begin
+                        current_state <= wait_state;  // 继续等待
+                    end
+                end
+                roll_state: begin
+                    if (BTN0_v == 0 && BTN7_v == 0 && cnt == 24'd3000000) begin
+                        current_state <= wait_state;  // 按钮释放后，返回等待状态
+                    end else begin
+                        current_state <= roll_state;  // 保持滚动状态
+                    end
+                end
+                celebrate_state: begin
+                    if (cnt_C == 24'd5000000) begin
+                        current_state <= rst_state;  // 庆祝完成后，返回初始状态
+                    end else begin
+                        current_state <= celebrate_state;  // 保持庆祝状态
+                    end
+                end
+                default: current_state <= rst_state;  // 默认回到初始状态
+            endcase
+        end
+    end
+
+    // 分数和计数器逻辑
+    always @(posedge clk) begin
+        if (~rst) begin
+            // 在复位状态下初始化所有信号
+        end else begin
+            case (current_state)
+                rst_state: begin
+                    score0 <= 3'b000;
+                    score7 <= 3'b000;
+                    cnt_C <= 24'd0;
+                    cnt <= 24'd0;
+                    enable <= 1'b0;
+                end
+                wait_state: begin
+                    enable <= 1'b0;
+                    cnt <= 16'd0;
+                end
+                roll_state: begin
+                    if (BTN0_v == 0 && BTN7_v == 0) begin
+                        cnt <= cnt + 1;  // 计数骰子滚动时间
+                    end
+                    if (BTN0_v && BTN7_v)
+                        enable <= 1'b1;  // 启动随机数生成器
+                    if (cnt == 24'd10) begin
+                        enable <= 1'b0;  // 停止随机数生成
+                        // 更新分数
+                        score0 <= (random_num1 < random_num2) ? score0 + 1 : score0;
+                        score7 <= (random_num1 > random_num2) ? score7 + 1 : score7;
+                    end
+                end
+                celebrate_state: begin
+                    cnt_C <= cnt_C + 1;  // 庆祝计时
+                    enable <= 1'b0;
+                    if (score0 >= win_score) begin
+                        winner <= 2'b01;  // 玩家 0 胜利
+                    end else if (score7 >= win_score) begin
+                        winner <= 2'b10;  // 玩家 7 胜利
+                    end
+                end
+                default: begin
+                    score0 <= 3'b000;
+                    score7 <= 3'b000;
+                    cnt_C <= 24'd0;
+                    enable <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+endmodule
+
+
+
+
+
+
+
+
+// 模块 lcg_random_mcu
+// 基于线性同余生成器 (Linear Congruential Generator, LCG) 的随机数生成模块。
+// 通过时钟和复位信号生成伪随机数，用于简单的随机应用场景。
+
+module lcg_random_mcu (
+    input wire        clk,         // 时钟信号
+    input wire        rst,         // 重置信号，高电平有效
+    input wire        enable,      // 启用信号，高电平表示允许生成随机数
+    input [5:0]       SEED,        // 初始种子值，用于确定伪随机序列的起点
+    output reg [3:0]  random_num   // 输出随机数，范围为 1 到 9
+);
+
+    reg [5:0] state;               // 伪随机数生成器的内部状态
+    reg [17:0] cnt;                // 计数器，用于控制随机数生成的时序
+
+    // LCG 参数定义
+    parameter A = 6'h2D;           // 乘数参数 (Multiplier)
+    parameter C = 6'h1F;           // 加数参数 (Increment)
+
+    // 主逻辑：伪随机数生成
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            // 复位时初始化状态和输出
+            state <= SEED;         // 初始化内部状态为种子值
+            cnt <= 18'd0;          // 计数器清零
+            random_num <= 4'd1;    // 默认随机数输出为 1
+        end else if (enable) begin
+            // 启用信号有效时，生成伪随机数
+            if (cnt == 18'd150000) begin 
+                // 达到设定的时钟周期（150,000周期）后生成一个新的随机数
+                state <= (state * A + C) & 6'h3F; // 更新内部状态，模 2^6
+                random_num <= (state % 9) + 1;    // 计算随机数，范围限制为 1 到 9
+                cnt <= 18'd0;                     // 重置计数器
+            end else begin
+                // 否则递增计数器，继续等待
+                cnt <= cnt + 1;
+            end
+        end
+    end
+
+endmodule
+
+
+
+
+// 模块 debounce
+// 实现按键去抖动功能，基于输入按键信号生成稳定的输出信号。
+module debounce (
+    input clk,          // 时钟信号
+    input rst,          // 重置信号，高电平有效
+    input key_in,       // 原始按键输入信号
+    output reg key_out  // 去抖动后的按键输出信号
+);
+
+    // 内部寄存器声明
+    reg [19:0] counter;  // 计数器，用于测量按键状态稳定时间
+    reg key_sync;        // 同步化后的按键信号，消除亚稳态
+    reg key_stable;      // 稳定的按键状态
+    reg key_last;        // 上一个时钟周期的同步化按键信号
+
+    parameter DEBOUNCE_TIME = 20000; // 去抖动时间阈值，单位为时钟周期数
+
+    // 按键输入信号同步化过程
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            key_sync <= 1'b0;  // 在复位时将同步信号清零
+        end else begin
+            key_sync <= key_in; // 同步 key_in 到 key_sync
+        end
+    end
+
+    // 去抖动逻辑实现
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            counter <= 20'd0;       // 复位计数器
+            key_stable <= 1'b0;    // 清除稳定状态标志
+            key_out <= 1'b0;       // 清除输出按键状态
+            key_last <= 1'b0;      // 清除上一周期按键状态
+        end else begin
+            if (key_sync == key_last) begin
+                // 如果当前按键状态与上一周期状态一致
+                if (counter < DEBOUNCE_TIME) begin
+                    counter <= counter + 1'b1; // 增加计数器值
+                end else begin
+                    // 如果计数器达到阈值，认为按键状态稳定
+                    key_stable <= key_sync;
+                    key_out <= key_sync;     // 更新按键输出信号
+                end
+            end else begin
+                // 如果按键状态发生变化，重置计数器
+                counter <= 20'd0;
+            end
+            key_last <= key_sync; // 更新上一周期按键状态
+        end
+    end
+
+endmodule
+
+
+module port_led(
+    input clk,
+    input rst,
+    input [2:0]current_state,
+    input [1:0]winner,
+    output reg [15:0]led_s
+    );
+    // 当上升沿到来或复位信号有效时执行
+    always @(posedge clk or posedge rst) begin 
+        if(rst) begin 
+            // 复位时，LED 状态初始化为全灭
+            led_s <= 16'b0;
+        end 
+        else begin
+            // 如果当前状态为庆祝状态
+            if(current_state == 3'b011) begin
+                // 根据胜者信息设置 LED 状态
+                if(winner==2'b01) begin
+                    // 如果胜者为 01，则点亮前 8 个 LED
+                    led_s <= 16'b1111111100000000;
+                end
+                else if (winner==2'b10) begin
+                    // 如果胜者为 10，则点亮后 8 个 LED
+                    led_s <= 16'b0000000011111111;
+                end
+            end
+            // 如果当前状态为初始状态或等待状态
+            else if (current_state == 3'b000||current_state == 3'b001) begin
+                // 则关闭所有 LED
+                led_s <= 16'd0;
+                
+        end
+    end
+    end
+endmodule
+
+
+module port_seg(
+    input clk,               // 时钟信号
+    input rst_n,             // 复位信号
+    input [1:0] num1,        // 第一个数码管要显示的数字
+    input [1:0] num2,        // 第二个数码管要显示的数字
+    output reg [6:0] seg,    // 数码管段选信号
+    output reg [7:0] an      // 数码管位选信号
+    );
+
+    // 定义一个7位的数组，用于存储0-9的数码管编码
+    reg [6:0] seg_code [0:9];
+
+    // 初始化数组，存储0-9的数码管编码
+    initial begin 
+        seg_code[0] = 7'b1111110;  // 0
+        seg_code[1] = 7'b0110000;  // 1
+        seg_code[2] = 7'b1101101;  // 2
+        seg_code[3] = 7'b1111001;  // 3
+        seg_code[4] = 7'b0110011;  // 4
+        seg_code[5] = 7'b1011011;  // 5
+        seg_code[6] = 7'b1011111;  // 6
+        seg_code[7] = 7'b1110000;  // 7
+        seg_code[8] = 7'b1111111;  // 8
+        seg_code[9] = 7'b1111011;  // 9
+    end
+
+    // 当上升沿到来或复位信号有效时执行
+    always @(posedge clk or posedge rst_n) begin
+        if (rst_n) begin
+            // 复位时，位选信号初始化为全1，即不选中任何数码管
+            an <= 8'b1111_1111;		  
+        end else begin       
+            // 根据当前位选信号的值，更新位选信号
+            case (an)
+                // 如果当前位选信号为全1，则更新为1111_1110，即选中第一个数码管
+			    8'b1111_1111: an <= 8'b1111_1110;
+                // 如果当前位选信号为0111_1111，则更新为1111_1110，即选中第一个数码管
+               8'b0111_1111: an <= 8'b1111_1110;
+                // 如果当前位选信号为1111_1110，则更新为0111_1111，即选中第二个数码管
+               8'b1111_1110: an <= 8'b0111_1111;
+                // 其他情况，位选信号保持不变
+               default: an <= 8'b1111_1111;
+            endcase 
+        end
+    end
+
+    // 当上升沿到来时执行
+    always @(posedge clk) begin
+        // 根据当前位选信号的值，更新段选信号
+        case (an)
+            // 如果当前位选信号为1111_1110，则根据num1的值选择相应的数码管编码
+            8'b11111110: seg = seg_code[num1]; 
+            // 如果当前位选信号为0111_1111，则根据num2的值选择相应的数码管编码
+            8'b01111111: seg = seg_code[num2]; 
+            // 其他情况，段选信号保持不变
+            default: seg = 7'b1111111;      
+        endcase	
+    end
+
+endmodule
+
+
+
+module clk_div (
+    input  clk,       // 输入时钟信号
+    input  rst,       // 复位信号
+    input  [31:0] div_factor,  // 分频系数
+    output reg clk_out   // 输出分频后的时钟信号
+    );
+    reg [31:0] counter;  // 计数器，用于计算分频次数
+
+    // 当上升沿到来或复位信号有效时执行
+    always @(posedge clk or posedge  rst) begin
+        if  (rst) begin
+            // 复位时，计数器清零，输出时钟信号初始化为低电平
+            counter <= 0;
+            clk_out <= 0;
+        end else begin
+            if (counter == div_factor - 1) begin
+                // 当计数器达到分频系数减一时，计数器清零，输出时钟信号取反
+                counter <= 0;
+                clk_out <= ~clk_out;
+            end else begin
+                // 否则，计数器加一
+                counter <= counter + 1;
+            end
+        end
+    end
+endmodule
+
+
+
+
+
+module buzzer  (
+    input clk,
+    input rst,
+    input [2:0] current_state,
+    input [1:0] winner,
+    output reg buzze
+);
+// 定义一个8位计数器
+reg [7:0]ccnt;
+// 定义一个7位PWM信号
+wire [6:0]pwm;
+// 定义一个32位计数器
+reg [31:0] cnt;
+// 定义一个计数器最大值
+parameter CNT_MAX = 32'd500000;
+
+// 实例化7个分频器
+clk_div f1(
+    .clk(clk),
+    .rst(rst),
+    .div_factor(1908),
+    .clk_out(pwm[0])
+);
+clk_div f2(
+    .clk(clk),
+    .rst(rst),
+    .div_factor(1700),
+    .clk_out(pwm[1])
+);
+clk_div f3(
+    .clk(clk),
+    .rst(rst),
+    .div_factor(1515),
+    .clk_out(pwm[2])
+);
+clk_div f4(
+    .clk(clk),
+    .rst(rst),
+    .div_factor(1432),
+    .clk_out(pwm[3])
+);
+clk_div f5(
+    .clk(clk),
+    .rst(rst),
+    .div_factor(1275),
+    .clk_out(pwm[4])
+);
+clk_div f6(
+    .clk(clk),
+    .rst(rst),
+    .div_factor(1136),
+    .clk_out(pwm[5])
+);
+clk_div f7(
+    .clk(clk),
+    .rst(rst),
+    .div_factor(1012),
+    .clk_out(pwm[6])
+);
+
+// 计数器，用于产生PWM信号
+always @(posedge clk or posedge rst)
+begin 
+    if (rst) begin
+        // 复位时，计数器清零
+        ccnt <= 0;
+		  cnt<=0;
+    end 
+    else begin 
+        // 如果计数器达到最大值，则清零
+        if (cnt >= CNT_MAX) begin
+            cnt <= 0;
+        	// 如果ccnt计数器达到6，则清零
+        	if (ccnt >=8'd6) begin
+            ccnt <= 0;
+        	end 
+			else begin
+            // 否则，ccnt计数器加1
+            ccnt <= ccnt + 1;
+        	end
+			end
+		else cnt <= cnt + 1;
+	end
+end
+
+// 根据当前状态和胜者信息产生蜂鸣声
+always@(posedge clk or posedge rst)
+begin
+    if (rst)begin
+        // 复位时，蜂鸣器关闭
+        buzze<=0;
+    end
+    else begin
+        // 如果当前状态为庆祝状态
+        if (current_state==3'b011) begin
+            // 根据胜者信息产生不同的蜂鸣声
+            if (winner==2'b01) begin
+                // 如果胜者为01，则输出PWM信号
+                buzze<=pwm[ccnt]; 
+            end
+            else if (winner==2'b10) begin
+                // 如果胜者为10，则输出反向PWM信号
+                buzze<=pwm[6-ccnt]; 
+            end	
+        end
+        // 如果当前状态不是庆祝状态，则关闭蜂鸣器
+        else buzze<=0;
+    end	
+end
+
+endmodule
+
+// 模块 dice
+// 用于基于输入状态和随机数生成骰子显示的数据，同时控制 RGB 灯的显示。
+module dice (
+    input clk,                // 时钟信号
+    input rst,                // 重置信号，高电平有效
+    input [2:0] current_state,// 当前状态机状态
+    inout wire [3:0] rand2,   // 第二个骰子的随机数输入（双向信号）
+    input wire [3:0] rand1,   // 第一个骰子的随机数输入
+    output reg [0:7] G_rgb,   // 绿色 LED 灯的行驱动数据
+    output reg [0:7] R_rgb,   // 红色 LED 灯的行驱动数据
+    output reg [0:7] row_rgb  // 显示当前行的行选择信号
+);
+
+// 内部寄存器声明
+reg [2:0] counter;            // 用于行扫描的计数器
+reg [0:7] data[0:7];          // 显示数据缓存，存储 8 行的 RGB 数据
+reg endframe;                 // 帧结束标志，用于控制一轮显示
+
+// 数据初始化与状态逻辑
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        // 当重置信号有效时，将所有显示数据清零
+        data[0] <= 8'b0000_0000;
+        data[1] <= 8'b0000_0000;
+        data[2] <= 8'b0000_0000;
+        data[3] <= 8'b0000_0000;
+        data[4] <= 8'b0000_0000;
+        data[5] <= 8'b0000_0000;
+        data[6] <= 8'b0000_0000;
+        data[7] <= 8'b0000_0000;
+    end else begin
+        // 当状态为掷骰子结束（current_state == 3'b010）且帧结束时，更新显示数据
+        if (current_state == 3'b010 && endframe == 1'b1) begin
+            // 根据第一个骰子的随机数 (rand1) 设置显示数据的前 3 行
+            case (rand1)
+                4'b0001: begin
+                    data[0] <= 8'b0000_0000;
+                    data[1] <= 8'b0100_0000;
+                    data[2] <= 8'b0000_0000;
+                end
+                4'b0010: begin
+                    data[0] <= 8'b1000_0000;
+                    data[1] <= 8'b0000_0000;
+                    data[2] <= 8'b0010_0000;
+                end
+                4'b0011: begin
+                    data[0] <= 8'b0010_0000;
+                    data[1] <= 8'b0100_0000;
+                    data[2] <= 8'b1000_0000;
+                end
+                4'b0100: begin
+                    data[0] <= 8'b1010_0000;
+                    data[1] <= 8'b0000_0000;
+                    data[2] <= 8'b1010_0000;
+                end
+                4'b0101: begin
+                    data[0] <= 8'b1010_0000;
+                    data[1] <= 8'b0100_0000;
+                    data[2] <= 8'b1010_0000;
+                end
+                4'b0110: begin
+                    data[0] <= 8'b1110_0000;
+                    data[1] <= 8'b0000_0000;
+                    data[2] <= 8'b1110_0000;
+                end
+                4'b0111: begin
+                    data[0] <= 8'b1110_0000;
+                    data[1] <= 8'b0100_0000;
+                    data[2] <= 8'b1110_0000;
+                end
+                4'b1000: begin
+                    data[0] <= 8'b1110_0000;
+                    data[1] <= 8'b1010_0000;
+                    data[2] <= 8'b1110_0000;
+                end
+                4'b1001: begin
+                    data[0] <= 8'b1110_0000;
+                    data[1] <= 8'b1110_0000;
+                    data[2] <= 8'b1110_0000;
+                end
+                default: begin
+                    data[0] <= 8'b0000_0000;
+                    data[1] <= 8'b0000_0000;
+                    data[2] <= 8'b0000_0000;
+                end
+            endcase
+
+            // 根据第二个骰子的随机数 (rand2) 设置显示数据的后 3 行
+            case (rand2)
+                4'b0001: begin
+                    data[5] <= 8'b0000_0000;
+                    data[6] <= 8'b0000_0010;
+                    data[7] <= 8'b0000_0000;
+                end
+                4'b0010: begin
+                    data[5] <= 8'b0000_0100;
+                    data[6] <= 8'b0000_0000;
+                    data[7] <= 8'b0000_0001;
+                end
+                4'b0011: begin
+                    data[5] <= 8'b0000_0001;
+                    data[6] <= 8'b0000_0010;
+                    data[7] <= 8'b0000_0100;
+                end
+                4'b0100: begin
+                    data[5] <= 8'b0000_0101;
+                    data[6] <= 8'b0000_0000;
+                    data[7] <= 8'b0000_0101;
+                end
+                4'b0101: begin
+                    data[5] <= 8'b0000_0101;
+                    data[6] <= 8'b0000_0010;
+                    data[7] <= 8'b0000_0101;
+                end
+                4'b0110: begin
+                    data[5] <= 8'b0000_0111;
+                    data[6] <= 8'b0000_0000;
+                    data[7] <= 8'b0000_0111;
+                end
+                4'b0111: begin
+                    data[5] <= 8'b0000_0111;
+                    data[6] <= 8'b0000_0010;
+                    data[7] <= 8'b0000_0111;
+                end
+                4'b1000: begin
+                    data[5] <= 8'b0000_0111;
+                    data[6] <= 8'b0000_0101;
+                    data[7] <= 8'b0000_0111;
+                end
+                4'b1001: begin
+                    data[5] <= 8'b0000_0111;
+                    data[6] <= 8'b0000_0111;
+                    data[7] <= 8'b0000_0111;
+                end
+                default: begin
+                    data[5] <= 8'b0000_0000;
+                    data[6] <= 8'b0000_0000;
+                    data[7] <= 8'b0000_0000;
+                end
+            endcase
+        end else if (current_state == 3'b001) begin
+            // 状态为初始状态，设置默认显示数据
+            data[0] <= 8'b1110_0000;
+            data[1] <= 8'b1110_0000;
+            data[2] <= 8'b1110_0000;
+            data[5] <= 8'b0000_0111;
+            data[6] <= 8'b0000_0111;
+            data[7] <= 8'b0000_0111;
+        end else begin
+            // 保持显示数据不变
+            data[0] <= data[0];
+            data[1] <= data[1];
+            data[2] <= data[2];
+            data[3] <= data[3];
+            data[4] <= data[4];
+            data[5] <= data[5];
+            data[6] <= data[6];
+            data[7] <= data[7];
+        end
+    end
+end
+
+// 行扫描与 RGB 显示控制
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        row_rgb <= 8'b1111_1111;  // 初始化所有行禁用
+        counter <= 3'b000;        // 初始化计数器为 0
+    end else begin
+        if (current_state == 3'b010 || current_state == 3'b001) begin
+            row_rgb <= ~(8'b1 << counter); // 按行扫描控制
+            R_rgb <= (counter < 3) ? data[counter] : 8'b0;  // 红色 LED 数据
+            G_rgb <= (counter > 4) ? data[counter] : 8'b0;  // 绿色 LED 数据
+            counter <= (counter == 7) ? 0 : counter + 1;    // 行计数循环更新
+            endframe <= (counter == 7);  // 判断是否完成一帧
+        end else begin
+            row_rgb <= 8'b1111_1111; // 非掷骰子状态，关闭显示
+        end
+    end
+end
+
+endmodule
+
